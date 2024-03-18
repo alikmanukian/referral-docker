@@ -1,0 +1,74 @@
+# This workflow builds the base docker container, and publishes it to Docker Hub and Github Container Registry
+name: Build and Deploy to Container Registries
+
+on:
+  push:
+    branches:
+    - main
+
+# Set ENVVARS
+env:
+  DH_REGISTRY: referralfactory
+  GHCR_REGISTRY: referral-factory
+  ECR_REGISTRY: referral-factory
+  GITHUB_SHA: ${{ github.sha }}
+  IMAGE: encryption
+  GHCR_REGISTRY_HOSTNAME: ghcr.io
+
+jobs:
+  setup-build-publish:
+    name: Setup, Build, Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    # Checkout the files
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    # Build and tag the Docker image for each registry
+    - name: Build Base Image
+      run: |
+        docker build -t $DH_REGISTRY/$IMAGE:latest .
+        docker tag $DH_REGISTRY/$IMAGE:latest $GHCR_REGISTRY_HOSTNAME/$GHCR_REGISTRY/$IMAGE:latest
+        docker tag $DH_REGISTRY/$IMAGE:latest ${{ secrets.AWS_ECR_URL }}/$ECR_REGISTRY/$IMAGE:latest
+
+#    # Login to Github Container Registry
+#    - name: Github Container Registry Login
+#      uses: 'docker/login-action@v2'
+#      with:
+#        registry: ${{ env.GHCR_REGISTRY_HOSTNAME }}
+#        username: ${{ github.actor }}
+#        password: ${{ secrets.GHCR_TOKEN }}
+#
+#    # Push the Docker image to Github Container Registry
+#    - name: Publish to GHCR
+#      run: |
+#        docker push $GHCR_REGISTRY_HOSTNAME/$GHCR_REGISTRY/$IMAGE:latest
+
+    # Login to Docker for Docker Hub
+    - name: Docker Hub Login
+      uses: 'docker/login-action@v2'
+      with:
+        username: 'byronrode'
+        password: ${{ secrets.RF_DH_PASSWORD }}
+
+    # Push the Docker image to Docker Hub
+    - name: Publish to Docker Hub
+      run: |
+        docker push $DH_REGISTRY/$IMAGE:latest
+
+#    - name: Login to ECR
+#      uses: 'docker/login-action@v2'
+#      with:
+#        registry: ${{ secrets.AWS_ECR_URL }}
+#        username: ${{ secrets.AWS_ECR_USER }}
+#        password: ${{ secrets.AWS_ECR_TOKEN }}
+#
+#    # Push the Docker image to ECR
+#    - name: Publish to ECR
+#      run: |
+#        docker push ${{ secrets.AWS_ECR_URL }}/$ECR_REGISTRY/$IMAGE:latest
