@@ -1,2 +1,6 @@
 scripts/test.sh
 var/*
+.idea
+data/*
+!data/.gitignore
+/.env
