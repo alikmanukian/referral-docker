@@ -61,6 +61,7 @@ services:
   laravel-horizon:
     build:
       context: ./docker/laravel-horizon
+    image: 'referral-factory/encryption-laravel-horizon:v3'
     volumes:
       - ./data/app:/var/www/html
       - ./docker/laravel-horizon/supervisord.d:/etc/supervisord.d
