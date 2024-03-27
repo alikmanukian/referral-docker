@@ -8,8 +8,8 @@ services:
     depends_on:
       - php-fpm
     volumes:
-      - ./data/app:/var/www/html:cached
-      - ./docker/nginx/sites:/etc/nginx/sites-available
+      - ./shared/data/app:/var/www/html:cached
+      - ./shared/nginx/sites:/etc/nginx/sites-available
     ports:
       - "8080:8080"
       - "8443:8443"
@@ -23,7 +23,7 @@ services:
       context: "./docker/php-fpm"
     image: 'referralfactory/encryption-php-fpm:v3'
     volumes:
-      - ./data/app:/var/www/html:cached
+      - ./shared/data/app:/var/www/html:cached
     networks:
       - sail
     expose:
@@ -36,8 +36,8 @@ services:
       context: ./docker/laravel-horizon
     image: 'referralfactory/encryption-laravel-horizon:v3'
     volumes:
-      - ./data/app:/var/www/html
-      - ./docker/laravel-horizon/supervisord.d:/etc/supervisord.d
+      - ./shared/data/app:/var/www/html
+      - ./shared/supervisord.d:/etc/supervisord.d
     depends_on:
       - php-fpm
     networks:
@@ -55,7 +55,7 @@ services:
       MYSQL_PASSWORD: '${DB_PASSWORD}'
       MYSQL_ALLOW_EMPTY_PASSWORD: 1
     volumes:
-      - './data/mysql:/var/lib/mysql'
+      - ./shared/data/mysql:/var/lib/mysql
     networks:
       - sail
     healthcheck:
@@ -68,7 +68,7 @@ services:
   redis:
     image: 'redis:alpine'
     volumes:
-      - 'sail-redis:/data'
+      - ./shared/data/redis:/data
     networks:
       - sail
     healthcheck:
@@ -81,6 +81,3 @@ services:
 networks:
   sail:
     driver: bridge
-volumes:
-  sail-redis:
-    driver: local
