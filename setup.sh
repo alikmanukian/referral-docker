@@ -1,8 +1,8 @@
 #!/bin/bash
 
 SHARED_FOLDER="shared"
-APP_FOLDER="$SHARED_FOLDER/data/app"
-APP_ENV_FILE="$APP_FOLDER/.env"
+APP_FOLDER="${SHARED_FOLDER}/data/app"
+APP_ENV_FILE="${APP_FOLDER}/.env"
 PULL=${1:-"pull"}
 BUILD_TYPE="$2"
 
@@ -125,21 +125,16 @@ update_env_var() {
     local new_value="$2"
     local file_path="$3"
 
-    # Determine OS and set sed in-place extension accordingly
-    local sed_extension=""
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        # macOS requires an empty string as an argument for in-place edits without backup
-        sed_extension="''"
-    fi
+    # Wrap the new value in double quotes and escape inner double quotes
+    local final_value="\"$(echo "$new_value" | sed 's/"/\\"/g')\""
 
-    # Check if the variable exists in the file (with any value, even empty)
-    if grep -qE "^${var_name}=" "$file_path"; then
-        # Variable exists, use 'sed' to update its value
-        eval sed -i $sed_extension "s#^${var_name}=.*#${var_name}=${new_value}#" "$file_path"
-    else
-        # Variable does not exist, append it to the file
-        echo "${var_name}=${new_value}" >> "$file_path"
-    fi
+    # Use awk to robustly search and replace or append the variable
+    awk -v var="$var_name" -v val="$final_value" -F "=" 'BEGIN{OFS=FS} $1 == var {$2=val; found=1} {print} END{if(!found) print var"="val}' "$file_path" > tmp.$$ && mv tmp.$$ "$file_path"
+}
+
+# Check if a command exists
+command_exists() {
+	command -v "$@" > /dev/null 2>&1
 }
 
 # ---------------------------------------------------------
@@ -149,7 +144,7 @@ update_env_var() {
 restart_system=0
 
 # check if docker is installed
-if command -v docker &> /dev/null; then
+if command_exists docker; then
     echo "Docker is installed"
 else
     # install docker
@@ -159,16 +154,14 @@ else
 fi
 
 # check if docker-compose is installed
-if command -v docker-compose &> /dev/null; then
+if command_exists docker-compose; then
     echo "Docker compose is installed"
 else
     # install docker-compose
-    sudo apt update && sudo apt install docker-compose -y
-    # for docker-compose version 2
-    # mkdir -p ~/.docker/cli-plugins/
-    # curl -SL https://github.com/docker/compose/releases/download/v2.4.1/docker-compose-$(uname -s)-$(uname -m) -o ~/.docker/cli-plugins/docker-compose
-    # chmod +x ~/.docker/cli-plugins/docker-compose
-    # ln -s ~/.docker/cli-plugins/docker-compose /usr/bin/docker-compose
+    mkdir -p ~/.docker/cli-plugins/
+    curl -SL https://github.com/docker/compose/releases/download/v2.4.1/docker-compose-$(uname -s)-$(uname -m) -o ~/.docker/cli-plugins/docker-compose
+    chmod +x ~/.docker/cli-plugins/docker-compose
+    ln -s ~/.docker/cli-plugins/docker-compose /usr/bin/docker-compose
 fi
 
 # restart system if docker is installed
@@ -177,24 +170,41 @@ if [ $restart_system -eq 1 ]; then
     exit 0
 fi
 
-# 1. prepare .env file
+# ask for reseting .env file
+if [ -f .env ]; then
+    DELETE_ENV=$(prompt_boolean "You already have .env file. Do you want to reset it ([Y]/n)?" "y")
+    if [ "$DELETE_ENV" == "true" ]; then
+        rm .env
+
+        # ask for deleting existing database
+        if [ -f "$SHARED_FOLDER/data/mysql/mysql" ]; then
+            KEEP_EXISTING_DB=$(prompt_boolean "You already have installed local db. Do you want to keep it ([Y]/n)?" "y")
+
+            if [ "$KEEP_EXISTING_DB" == "false" ]; then
+                sudo rm -rf "$SHARED_FOLDER/data/mysql"
+            fi
+        fi
+    fi
+fi
+
+# prepare .env file
 if [ ! -f .env ]; then
     echo "Please provide the following details to setup the project:"
 
     APP_KEY=$(generateAppKey)
     APP_URL=$(validUrl "Application URL (Ex: https://google.com)")
     REPO_PULL_TOKEN=$(prompt "API token to pull encryption repository")
-    REPO_AUTO_UPDATE=$(prompt_boolean "Do you want to update encryption project manually ([Y]/n)" "y")
+    REPO_AUTO_UPDATE=$(prompt_boolean "Do you want to update encryption project manually ([Y]/n)?" "y")
     if [ "$REPO_AUTO_UPDATE" == "true" ]; then
         REPO_AUTO_UPDATE="false"
     else
         REPO_AUTO_UPDATE="true"
     fi
     SUPERUSER_EMAIL=$(validEmail "Superuser email")
-    OTP_ENABLED=$(prompt_boolean "Do you want to use 2 factor authentication ([Y]/n)" "y")
+    OTP_ENABLED=$(prompt_boolean "Do you want to use 2 factor authentication ([Y]/n)?" "y")
     APP_RF_FULL_URL=$(validUrl "Enter Referral factory API URL (Ex: https://referral-factory.com). Skip this if you are a developer in \"Referral Factory\"." "https://referral-factory.com")
-    DISABLE_NGINX_PROXY=$(prompt_boolean "Do you want to disable the NGINX proxying for Kubernetes environments (y/[N])" "n")
-    USE_EXTERNAL_DB=$(prompt_boolean "Do you want to use external database (y/[N])" "n")
+    DISABLE_NGINX_PROXY=$(prompt_boolean "Do you want to disable the NGINX proxying for Kubernetes environments (y/[N])?" "n")
+    USE_EXTERNAL_DB=$(prompt_boolean "Do you want to use external database (y/[N])?" "n")
 
     if [ "$USE_EXTERNAL_DB" == "true" ]; then
         DB_CONNECTION=$(variants "Choose database connection" "mysql|pgsql|sqlite")
@@ -234,10 +244,10 @@ else
     source .env
 fi
 
-# 2. prepare shared folder
+# prepare shared folder
 mkdir -p $SHARED_FOLDER/data/{mysql,redis,app}
 
-# 3. prepare project
+# prepare project
 if [ -n "$REPO_PULL_TOKEN" ]; then
 
     if [ ! -z "$(find "$APP_FOLDER" -maxdepth 0 -type d -empty)" ]; then
@@ -282,16 +292,19 @@ else
 fi
 
 # replace nginx server_name
-#DOMAIN=$(echo "$APP_URL" | sed -e 's/^http:\/\///' -e 's/^https:\/\///' -e 's/^\/\///')
+# DOMAIN=$(echo "$APP_URL" | sed -e 's/^http:\/\///' -e 's/^https:\/\///' -e 's/^\/\///')
 
 # run new containers
 docker-compose down
-docker-compose up -d
+if [ "$USE_EXTERNAL_DB" == "true" ]; then
+    docker-compose up -d nginx php-fpm laravel-horizon redis
+else
+    docker-compose up -d nginx php-fpm laravel-horizon redis mysql
+fi
 
 echo "Wait for 20 seconds to start the containers..."
 sleep 20
 
 # migrate, build and update app
-docker-compose exec php-fpm git config --global --add safe.directory /var/www/html
 docker-compose exec php-fpm composer install
 docker-compose exec php-fpm php artisan app:update

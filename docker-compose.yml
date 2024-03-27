@@ -3,7 +3,7 @@ version: '3'
 services:
   nginx:
     build:
-      context: "./docker/nginx"
+      context: ./docker/nginx
     image: 'referralfactory/encryption-nginx:v3'
     depends_on:
       - php-fpm
@@ -20,7 +20,7 @@ services:
 
   php-fpm:
     build:
-      context: "./docker/php-fpm"
+      context: ./docker/php-fpm
     image: 'referralfactory/encryption-php-fpm:v3'
     volumes:
       - ./shared/data/app:/var/www/html:cached
