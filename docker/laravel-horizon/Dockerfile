@@ -116,6 +116,7 @@ RUN curl -s http://getcomposer.org/installer | php && \
 # Source the bash
 RUN . ~/.bashrc
 
+# install npm
 RUN apk --update add npm
 RUN npm install -g npm
 RUN chown -R $PUID:$PGID /root/.npm
