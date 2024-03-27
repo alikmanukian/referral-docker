@@ -4,3 +4,4 @@ var/*
 shared/data/*
 !data/.gitignore
 /.env
+.DS_Store

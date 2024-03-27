@@ -159,11 +159,16 @@ else
 fi
 
 # check if docker-compose is installed
-if command -v docker &> /dev/null; then
+if command -v docker-compose &> /dev/null; then
     echo "Docker compose is installed"
 else
     # install docker-compose
-    sudo apt install docker-compose -y
+    sudo apt update && sudo apt install docker-compose -y
+    # for docker-compose version 2
+    # mkdir -p ~/.docker/cli-plugins/
+    # curl -SL https://github.com/docker/compose/releases/download/v2.4.1/docker-compose-$(uname -s)-$(uname -m) -o ~/.docker/cli-plugins/docker-compose
+    # chmod +x ~/.docker/cli-plugins/docker-compose
+    # ln -s ~/.docker/cli-plugins/docker-compose /usr/bin/docker-compose
 fi
 
 # restart system if docker is installed
@@ -283,9 +288,10 @@ fi
 docker-compose down
 docker-compose up -d
 
-echo "Wait for 10 seconds to start the containers..."
+echo "Wait for 20 seconds to start the containers..."
 sleep 20
 
 # migrate, build and update app
+docker-compose exec php-fpm git config --global --add safe.directory /var/www/html
 docker-compose exec php-fpm composer install
 docker-compose exec php-fpm php artisan app:update
