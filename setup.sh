@@ -6,7 +6,7 @@ APP_ENV_FILE="${APP_FOLDER}/.env"
 PULL=${1:-"pull"}
 BUILD_TYPE="$2"
 ENCRYPTION_PROJECT_PATH="bitbucket.org/referral-factory/encryption.git"
-DOWNLOAD_RAW_URL="https://bitbucket.org/referral-factory/docker/raw/6a6698b7bb98cb7f415c64cf77ebebc7090f8f78"
+DOWNLOAD_RAW_URL="https://raw.githubusercontent.com/alikmanukian/referral-docker/main"
 
 # Determine OS and set sed in-place extension accordingly
 sed_extension=""
