@@ -5,6 +5,8 @@ APP_FOLDER="${SHARED_FOLDER}/data/app"
 APP_ENV_FILE="${APP_FOLDER}/.env"
 PULL=${1:-"pull"}
 BUILD_TYPE="$2"
+ENCRYPTION_PROJECT_PATH="bitbucket.org/referral-factory/encryption.git"
+DOWNLOAD_RAW_URL="https://bitbucket.org/referral-factory/docker/raw/6a6698b7bb98cb7f415c64cf77ebebc7090f8f78"
 
 # Determine OS and set sed in-place extension accordingly
 sed_extension=""
@@ -13,6 +15,9 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     sed_extension="''"
 fi
 
+# ---------------------------------------------------
+# Helper functions
+# ---------------------------------------------------
 trim() {
     echo $(echo "$1" | sed "s/^\\(['\"]\\)\\(.*\\)\\1$/\\2/")
 }
@@ -29,8 +34,8 @@ envInContainer() {
 # fetch env value from encryption container
 # example: echo $(envInEncryption "DB_PASSWORD")
 envInEncryption() {
-  local VALUE=$1
-  echo $(envInContainer "encryption-nginx" "$VALUE" "/var/www/html/.env")
+    local VALUE=$1
+    echo $(envInContainer "encryption-nginx" "$VALUE" "/var/www/html/.env")
 }
 
 # promt user for input
@@ -137,174 +142,200 @@ command_exists() {
 	command -v "$@" > /dev/null 2>&1
 }
 
+# ---------------------------------------------------
+# Actions
+# ---------------------------------------------------
+check_requirements() {
+    # check sudo access
+    if ! sudo -ln 2>&1 | grep -q 'may run the following'; then
+      echo "Current user does not have sudo access. Please run the script with a user having sudo access."
+      exit 1
+    fi
+}
+
+ensure_docker_compose_installed() {
+    if ! command_exists docker-compose; then
+        echo "Installing Docker Compose ..."
+        sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        sudo chmod +x /usr/local/bin/docker-compose
+    else
+        # if docker-compose is version 1, reinstall to version 2
+        CURRENT_VERSION=$(docker-compose --version | awk '{print $3}' | cut -d ',' -f1)
+
+        # Check if version starting from 1
+        if [[ "$CURRENT_VERSION" == 1.* ]]; then
+            # deleting current version of docker-compose
+            sudo rm $(which docker-compose)
+
+            # Installing docker-compose latest version
+            COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | jq -r '.name')
+            sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+        fi
+    fi
+}
+
+ask_for_resetting_env_file() {
+    if [ -f .env ]; then
+        DELETE_ENV=$(prompt_boolean "You already have .env file. Do you want to reset it ([Y]/n)?" "y")
+        if [ "$DELETE_ENV" == "true" ]; then
+            rm .env
+
+            # ask for deleting existing database
+            if [ -f "$SHARED_FOLDER/data/mysql/mysql" ]; then
+                KEEP_EXISTING_DB=$(prompt_boolean "You already have installed local db. Do you want to keep it ([Y]/n)?" "y")
+
+                if [ "$KEEP_EXISTING_DB" == "false" ]; then
+                    sudo rm -rf "$SHARED_FOLDER/data/mysql"
+                fi
+            fi
+        fi
+    fi
+}
+
+prepare_env_file() {
+    if [ ! -f .env ]; then
+        echo "Please provide the following details to setup the project:"
+
+        APP_KEY=$(generateAppKey)
+        APP_URL=$(validUrl "Application URL (Ex: https://google.com)")
+        REPO_PULL_TOKEN=$(prompt "API token to pull encryption repository")
+        REPO_AUTO_UPDATE=$(prompt_boolean "Do you want to update encryption project manually ([Y]/n)?" "y")
+        if [ "$REPO_AUTO_UPDATE" == "true" ]; then
+            REPO_AUTO_UPDATE="false"
+        else
+            REPO_AUTO_UPDATE="true"
+        fi
+        SUPERUSER_EMAIL=$(validEmail "Superuser email")
+        OTP_ENABLED=$(prompt_boolean "Do you want to use 2 factor authentication ([Y]/n)?" "y")
+        APP_RF_FULL_URL=$(validUrl "Enter Referral factory API URL (Ex: https://referral-factory.com). Skip this if you are a developer in \"Referral Factory\"." "https://referral-factory.com")
+        DISABLE_NGINX_PROXY=$(prompt_boolean "Do you want to disable the NGINX proxying for Kubernetes environments (y/[N])?" "n")
+        USE_EXTERNAL_DB=$(prompt_boolean "Do you want to use external database (y/[N])?" "n")
+
+        if [ "$USE_EXTERNAL_DB" == "true" ]; then
+            DB_CONNECTION=$(variants "Choose database connection" "mysql|pgsql|sqlite")
+
+            if [ "$DB_CONNECTION" != "sqlite" ]; then
+                DB_DATABASE=$(prompt "Enter database name")
+                DB_HOST=$(prompt "Enter database host")
+                DB_PORT=$(prompt "Enter database port")
+                DB_USERNAME=$(prompt "Enter database user name")
+            fi
+        fi
+
+        DB_PASSWORD=$(prompt "Choose database password")
+
+        # write .env file
+        echo "APP_URL=$APP_URL" >> .env
+        echo "APP_KEY=$APP_KEY" >> .env
+        echo "REPO_PULL_TOKEN=$REPO_PULL_TOKEN" >> .env
+        echo "REPO_AUTO_UPDATE=$REPO_AUTO_UPDATE" >> .env
+        echo "SUPERUSER_EMAIL=$SUPERUSER_EMAIL" >> .env
+        echo "OTP_ENABLED=$OTP_ENABLED" >> .env
+        echo "DISABLE_NGINX_PROXY=$DISABLE_NGINX_PROXY" >> .env
+        echo "APP_RF_FULL_URL=$APP_RF_FULL_URL" >> .env
+        echo "DB_PASSWORD=$DB_PASSWORD" >> .env
+
+        if [ "$USE_EXTERNAL_DB" == "true" ]; then
+            echo "USE_EXTERNAL_DB=$USE_EXTERNAL_DB" >> .env
+            echo "DB_CONNECTION=$DB_CONNECTION" >> .env
+            echo "DB_DATABASE=$DB_DATABASE" >> .env
+            if [ "$DB_CONNECTION" != "sqlite" ]; then
+                echo "DB_HOST=$DB_HOST" >> .env
+                echo "DB_PORT=$DB_PORT" >> .env
+                echo "DB_USERNAME=$DB_USERNAME" >> .env
+            fi
+        fi
+    fi
+
+    source .env
+}
+
+setup_encryption_app() {
+    # prepare shared folder
+    mkdir -p $SHARED_FOLDER/data/{mysql,redis,app}
+
+    # prepare project
+    if [ -n "$REPO_PULL_TOKEN" ]; then
+
+        if [ ! -z "$(find "$APP_FOLDER" -maxdepth 0 -type d -empty)" ]; then
+            set -e # exit from script on error on pull
+
+            echo "Cloning project..."
+            # clone project if shared/app is empty
+            git clone "https://x-token-auth:$REPO_PULL_TOKEN@$ENCRYPTION_PROJECT_PATH" "$APP_FOLDER/."
+
+            set +e # disable exit on error
+        fi
+
+        # copy .env file for app
+        cp $APP_FOLDER/.env.example $APP_ENV_FILE
+
+        # replace values in .env file
+        update_env_var "APP_RF_FULL_URL" "$APP_RF_FULL_URL" $APP_ENV_FILE
+        update_env_var "REPO_AUTO_UPDATE" "$REPO_AUTO_UPDATE" $APP_ENV_FILE
+        update_env_var "OTP_ENABLED" "$OTP_ENABLED" $APP_ENV_FILE
+        update_env_var "APP_URL" "$APP_URL" $APP_ENV_FILE
+        update_env_var "APP_KEY" "$APP_KEY" $APP_ENV_FILE
+        update_env_var "DB_PASSWORD" "$DB_PASSWORD" $APP_ENV_FILE
+        if [ "$USE_EXTERNAL_DB" == "true" ]; then
+            update_env_var "DB_CONNECTION" "$DB_CONNECTION" $APP_ENV_FILE
+            update_env_var "DB_DATABASE" "$DB_DATABASE" $APP_ENV_FILE
+            if [ "$DB_CONNECTION" != "sqlite" ]; then
+                update_env_var "DB_HOST" "$DB_HOST" $APP_ENV_FILE
+                update_env_var "DB_PORT" "$DB_PORT" $APP_ENV_FILE
+                update_env_var "DB_USERNAME" "$DB_USERNAME" $APP_ENV_FILE
+            fi
+        fi
+        update_env_var "MAIL_FROM_ADDRESS" "$SUPERUSER_EMAIL" $APP_ENV_FILE
+    fi
+}
+
+setup_containers() {
+    set -e
+
+    # 6. build pull service images
+    if [ "$PULL" == "pull" ]; then
+        docker-compose pull
+    else
+        docker-compose build $BUILD_TYPE
+    fi
+
+    # replace nginx server_name
+    # DOMAIN=$(echo "$APP_URL" | sed -e 's/^http:\/\///' -e 's/^https:\/\///' -e 's/^\/\///')
+
+    # run new containers
+    docker-compose down
+    if [ "$USE_EXTERNAL_DB" == "true" ]; then
+        docker-compose up -d nginx php-fpm laravel-horizon redis
+    else
+        docker-compose up -d nginx php-fpm laravel-horizon redis mysql
+    fi
+
+    echo "Wait for 20 seconds to start the containers..."
+    sleep 20
+
+    # migrate, build and update app
+    docker-compose exec php-fpm composer install
+    docker-compose exec php-fpm php artisan app:update
+}
+
+download_additional_files() {
+    curl -o docker-compose.yml $DOWNLOAD_RAW_URL/docker-compose.yml
+    mkdir -p shared/nginx/sites
+    curl -o shared/nginx/sites/default.conf $DOWNLOAD_RAW_URL/shared/nginx/sites/default.conf
+    mkdir -p shared/supervisord.d
+    curl -o shared/supervisord.d/laravel-worker.conf $DOWNLOAD_RAW_URL/shared/supervisord.d/laravel-worker.conf
+}
+
 # ---------------------------------------------------------
 # Main script starts here
 # ---------------------------------------------------------
 
-restart_system=0
-
-# check if docker is installed
-if command_exists docker; then
-    echo "Docker is installed"
-else
-    # install docker
-    curl -fsSL https://get.docker.com | sudo sh -
-    sudo gpasswd -a $(whoami) docker
-    restart_system=1
-fi
-
-# check if docker-compose is installed
-if command_exists docker-compose; then
-    echo "Docker compose is installed"
-else
-    # install docker-compose
-    mkdir -p ~/.docker/cli-plugins/
-    curl -SL https://github.com/docker/compose/releases/download/v2.4.1/docker-compose-$(uname -s)-$(uname -m) -o ~/.docker/cli-plugins/docker-compose
-    chmod +x ~/.docker/cli-plugins/docker-compose
-    ln -s ~/.docker/cli-plugins/docker-compose /usr/bin/docker-compose
-fi
-
-# restart system if docker is installed
-if [ $restart_system -eq 1 ]; then
-    sudo reboot
-    exit 0
-fi
-
-# ask for reseting .env file
-if [ -f .env ]; then
-    DELETE_ENV=$(prompt_boolean "You already have .env file. Do you want to reset it ([Y]/n)?" "y")
-    if [ "$DELETE_ENV" == "true" ]; then
-        rm .env
-
-        # ask for deleting existing database
-        if [ -f "$SHARED_FOLDER/data/mysql/mysql" ]; then
-            KEEP_EXISTING_DB=$(prompt_boolean "You already have installed local db. Do you want to keep it ([Y]/n)?" "y")
-
-            if [ "$KEEP_EXISTING_DB" == "false" ]; then
-                sudo rm -rf "$SHARED_FOLDER/data/mysql"
-            fi
-        fi
-    fi
-fi
-
-# prepare .env file
-if [ ! -f .env ]; then
-    echo "Please provide the following details to setup the project:"
-
-    APP_KEY=$(generateAppKey)
-    APP_URL=$(validUrl "Application URL (Ex: https://google.com)")
-    REPO_PULL_TOKEN=$(prompt "API token to pull encryption repository")
-    REPO_AUTO_UPDATE=$(prompt_boolean "Do you want to update encryption project manually ([Y]/n)?" "y")
-    if [ "$REPO_AUTO_UPDATE" == "true" ]; then
-        REPO_AUTO_UPDATE="false"
-    else
-        REPO_AUTO_UPDATE="true"
-    fi
-    SUPERUSER_EMAIL=$(validEmail "Superuser email")
-    OTP_ENABLED=$(prompt_boolean "Do you want to use 2 factor authentication ([Y]/n)?" "y")
-    APP_RF_FULL_URL=$(validUrl "Enter Referral factory API URL (Ex: https://referral-factory.com). Skip this if you are a developer in \"Referral Factory\"." "https://referral-factory.com")
-    DISABLE_NGINX_PROXY=$(prompt_boolean "Do you want to disable the NGINX proxying for Kubernetes environments (y/[N])?" "n")
-    USE_EXTERNAL_DB=$(prompt_boolean "Do you want to use external database (y/[N])?" "n")
-
-    if [ "$USE_EXTERNAL_DB" == "true" ]; then
-        DB_CONNECTION=$(variants "Choose database connection" "mysql|pgsql|sqlite")
-
-        if [ "$DB_CONNECTION" != "sqlite" ]; then
-            DB_DATABASE=$(prompt "Enter database name")
-            DB_HOST=$(prompt "Enter database host")
-            DB_PORT=$(prompt "Enter database port")
-            DB_USERNAME=$(prompt "Enter database user name")
-        fi
-    fi
-
-    DB_PASSWORD=$(prompt "Choose database password")
-
-    # write .env file
-    echo "APP_URL=$APP_URL" >> .env
-    echo "APP_KEY=$APP_KEY" >> .env
-    echo "REPO_PULL_TOKEN=$REPO_PULL_TOKEN" >> .env
-    echo "REPO_AUTO_UPDATE=$REPO_AUTO_UPDATE" >> .env
-    echo "SUPERUSER_EMAIL=$SUPERUSER_EMAIL" >> .env
-    echo "OTP_ENABLED=$OTP_ENABLED" >> .env
-    echo "DISABLE_NGINX_PROXY=$DISABLE_NGINX_PROXY" >> .env
-    echo "APP_RF_FULL_URL=$APP_RF_FULL_URL" >> .env
-    echo "DB_PASSWORD=$DB_PASSWORD" >> .env
-
-    if [ "$USE_EXTERNAL_DB" == "true" ]; then
-        echo "USE_EXTERNAL_DB=$USE_EXTERNAL_DB" >> .env
-        echo "DB_CONNECTION=$DB_CONNECTION" >> .env
-        echo "DB_DATABASE=$DB_DATABASE" >> .env
-        if [ "$DB_CONNECTION" != "sqlite" ]; then
-            echo "DB_HOST=$DB_HOST" >> .env
-            echo "DB_PORT=$DB_PORT" >> .env
-            echo "DB_USERNAME=$DB_USERNAME" >> .env
-        fi
-    fi
-else
-    source .env
-fi
-
-# prepare shared folder
-mkdir -p $SHARED_FOLDER/data/{mysql,redis,app}
-
-# prepare project
-if [ -n "$REPO_PULL_TOKEN" ]; then
-
-    if [ ! -z "$(find "$APP_FOLDER" -maxdepth 0 -type d -empty)" ]; then
-        set -e # exit from script on error on pull
-
-        echo "Cloning project..."
-        # clone project if shared/app is empty
-        git clone "https://x-token-auth:$REPO_PULL_TOKEN@bitbucket.org/referral-factory/encryption.git" "$APP_FOLDER/."
-
-        set +e # disable exit on error
-    fi
-
-    # copy .env file for app
-    cp $APP_FOLDER/.env.example $APP_ENV_FILE
-
-    # replace values in .env file
-    update_env_var "APP_RF_FULL_URL" "$APP_RF_FULL_URL" $APP_ENV_FILE
-    update_env_var "REPO_AUTO_UPDATE" "$REPO_AUTO_UPDATE" $APP_ENV_FILE
-    update_env_var "OTP_ENABLED" "$OTP_ENABLED" $APP_ENV_FILE
-    update_env_var "APP_URL" "$APP_URL" $APP_ENV_FILE
-    update_env_var "APP_KEY" "$APP_KEY" $APP_ENV_FILE
-    update_env_var "DB_PASSWORD" "$DB_PASSWORD" $APP_ENV_FILE
-    if [ "$USE_EXTERNAL_DB" == "true" ]; then
-        update_env_var "DB_CONNECTION" "$DB_CONNECTION" $APP_ENV_FILE
-        update_env_var "DB_DATABASE" "$DB_DATABASE" $APP_ENV_FILE
-        if [ "$DB_CONNECTION" != "sqlite" ]; then
-            update_env_var "DB_HOST" "$DB_HOST" $APP_ENV_FILE
-            update_env_var "DB_PORT" "$DB_PORT" $APP_ENV_FILE
-            update_env_var "DB_USERNAME" "$DB_USERNAME" $APP_ENV_FILE
-        fi
-    fi
-    update_env_var "MAIL_FROM_ADDRESS" "$SUPERUSER_EMAIL" $APP_ENV_FILE
-fi
-
-set -e
-
-# 6. build pull service images
-if [ "$PULL" == "pull" ]; then
-    docker-compose pull
-else
-    docker-compose build $BUILD_TYPE
-fi
-
-# replace nginx server_name
-# DOMAIN=$(echo "$APP_URL" | sed -e 's/^http:\/\///' -e 's/^https:\/\///' -e 's/^\/\///')
-
-# run new containers
-docker-compose down
-if [ "$USE_EXTERNAL_DB" == "true" ]; then
-    docker-compose up -d nginx php-fpm laravel-horizon redis
-else
-    docker-compose up -d nginx php-fpm laravel-horizon redis mysql
-fi
-
-echo "Wait for 20 seconds to start the containers..."
-sleep 20
-
-# migrate, build and update app
-docker-compose exec php-fpm composer install
-docker-compose exec php-fpm php artisan app:update
+check_requirements
+ensure_docker_compose_installed
+ask_for_resetting_env_file
+prepare_env_file
+download_additional_files
+setup_encryption_app
+setup_containers
