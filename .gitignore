@@ -1,2 +1,7 @@
 scripts/test.sh
 var/*
+.idea
+shared/data/*
+!data/.gitignore
+/.env
+.DS_Store
